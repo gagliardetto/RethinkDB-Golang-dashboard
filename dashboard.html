@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Analytics Dashboard</title>
+    <style type="text/css">
+        html,
+        body {
+            color: #bfbfbf;
+        }
+        #chart {
+            height: 95vh;
+        }
+        #latest_sales, #top_selling {
+            height: 200px;
+            overflow-y: scroll;
+            float: right;
+        }
+        #latest_sales > p , #top_selling > p {
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+    <script src="./assets/jquery-1.11.1.min.js"></script>
+    <link rel="stylesheet" href="./assets/bootstrap.min.css">
+    <script src="./assets/bootstrap.min.js"></script>
+    <link rel="stylesheet" href="./assets/nv.d3.css">
+    <script src="./assets/d3.min.js"></script>
+    <script src="./assets/nv.d3.js"></script>
+    <script src="./assets/reconnecting-websocket.min.js" type="text/javascript"></script>
+
+    <div id="latest_sales" class="col-xs-12 col-sm-12 col-md-6 col-lg-6 col-xl-6 pull-right"></div>
+    <div id="top_selling" class="col-xs-12 col-sm-12 col-md-6 col-lg-6 col-xl-6"></div>
+
+    <div id='chart' class='chart with-transitions col-xs-12'>
+        <svg></svg>
+    </div>
+
+    <script>
+
+        var chartObj;
+        var graphs = [{
+            key: "$ in sales",
+            color: "green",
+            values: [{}]
+        }, {
+            key: "N. of sales",
+            color: "blue",
+            values: [{}]
+        }, {
+            key: "Avg. $ per sale",
+            color: "purple",
+            values: [{}]
+        }];
+        nv.addGraph(function () {
+            var width = nv.utils.windowSize().width - 40,
+                height = nv.utils.windowSize().height - 40;
+
+            chartObj = nv.models.lineChart()
+                .options({
+                    transitionDuration: 0,
+                    useInteractiveGuideline: true
+                })
+                .width(width)
+                .height(height)
+                .margin({
+                    top: 20,
+                    right: 20,
+                    bottom: 20,
+                    left: 20
+                });
+
+            chartObj
+                .x(function (d, i) {
+                    return d.x * 1000 //because it's in milliseconds
+                });
+
+            chartObj.xAxis
+                //.tickFormat(d3.format(',.1f'))
+                .tickFormat(function(d) {
+                            return d3.time.format('%H:%M')(new Date(d))
+                          })
+                .ticks(d3.time.minutes, 60)
+                .axisLabel("Time");
+
+            chartObj.yAxis
+                .axisLabel('Values')
+                .tickFormat(d3.format(',.2f'));
+
+            chartObj.showXAxis(true).showYAxis(true).rightAlignYAxis(true).margin({
+                right: 90
+            });
+
+            d3.select('#chart svg')
+                .datum(graphs)
+                .transition().duration(500)
+                .call(chartObj);
+
+            nv.utils.windowResize(chartObj.update);
+
+            return chartObj;
+        });
+    
+        setTimeout(function(){
+            var analyticsSocket = new ReconnectingWebSocket("ws://127.0.0.1:8011/socket", null, {});
+            analyticsSocket.automaticOpen = true; //try reconnecting
+            analyticsSocket.reconnectInterval = 3000; //when the connection drops, try reconnecting every 3 seconds
+            analyticsSocket.onopen = function () {
+                //this function is fired when the websocket successfully connects
+                console.log("websocket connected");
+            }
+            analyticsSocket.onclose = function (e) {
+                //this function is fired when the websocket is disconnected or the connection drops
+            }
+            analyticsSocket.onmessage = function (e) {
+                //this function is fired when a message is received from the server
+
+                //the following code parses the message, and passes the data to the desired function
+                var input = JSON && JSON.parse(e.data) || $.parseJSON(e.data);
+                if (window["analyticsNS"][input.function]) {
+                    window["analyticsNS"][input.function](input.data);
+                };
+                //the available functions are all in the window.analyticsNS namespace
+            };
+        },3000)
+
+        window.analyticsNS = {}; //namespace of all functions accessible through the websocket
+        window.analyticsNS.log = function (message) {
+            console.log(message)
+        }
+        window.analyticsNS.switch = function (data) {
+            //this function checks the type of message and passes the data to the correspondent function;
+            //in this example we only have the "sale" type, which is passed to the loadLatestSales() function
+
+            switch(data.type) {
+                case "sale":
+                    console.log("it's a 'sale' event");
+                    window.analyticsNS.loadLatestSales(data.data);
+                    break;
+                default:
+                    console.log("it's a: '"+data.type+"' event");
+            }
+        }
+        window.analyticsNS.loadLatestSales = function (data) {
+            //this function checks if the data is an array, or a single sale;
+
+            //window.analyticsNS.loadLatestSales([{buyer_id:"some user",product_id:"some product",price:100}])
+            
+            console.log("loadLatestSales:",data);
+
+            if (data == null) {
+                return
+            };
+
+            if (Object.prototype.toString.call(data) === '[object Array]') {
+                //is an array of the latest 10 sales
+                //that is sent on every websocket (re)connection
+                
+                $("#latest_sales > p").remove(); //reset the content
+
+                $.each(data,function(i,sale){
+                    $("#latest_sales").append($('<p><b>'+sale.buyer_id+'</b> <small> bought</small> <b>'+sale.product_id+'</b> <small>for</small> <b>$'+sale.price+'</b> <span class="howMuchTimeAgo" date="'+sale.date+'"></span> </p>'));
+                    $("#latest_sales > p:last").fadeIn();
+                })
+            } else {
+                //is a single sale from the changefeed
+                $("#latest_sales").prepend($('<p><b>'+data.buyer_id+'</b> <small>just bought</small> <b>'+data.product_id+'</b> <small>for</small> <b>$'+data.price+'</b> <span class="howMuchTimeAgo" date="'+data.date+'"></span> </p>'));
+                $("#latest_sales > p:first").fadeIn();
+
+                if ($("#latest_sales > p").length > 50) {
+                    $("#latest_sales > p:last-child").remove()
+                };
+            }
+
+            howMuchTimeAgo();
+        }
+        window.analyticsNS.loadTopSellingProducts = function (data) {
+            //this function is fired when the server sends the list of top selling products
+
+            console.log("loadTopSellingProducts:",data.data);
+
+            if (data.data != null) {
+                $("#top_selling > p").remove(); //reset the content
+
+                $.each(data.data,function(i,sale){
+                    $("#top_selling").prepend($('<p><b>"'+sale.group+'"</b>: <small>n. of sales</small> <b>'+sale.reduction.n_sales+'</b>, <small>revenue</small> <b>$'+sale.reduction.revenue+'</b></p>'));
+                    $("#top_selling > p:first").fadeIn();
+
+                    if ($("#top_selling > p").length > 50) {
+                        $("#top_selling > p:last-child").remove()
+                    };
+                })
+            };
+        }
+
+        window.analyticsNS.addPoint = function (point) {
+            var stream = point["stream"];
+
+            graphs[stream].values.push({
+                x: point["x"],
+                y: point["y"]
+            });
+
+            if (graphs[stream].values.length > 100) {
+                graphs[stream].values.shift();
+            }
+
+            window.chartObj.update();
+        }
+
+        window.analyticsNS.loadGraphData = function (data) {
+            console.log("loadGraphData",data.data);
+            //window.analyticsNS.addPoint({"x":1445610746.513,"y":50,"stream":1})
+                $.each(data.data,function(i,point){
+                    console.log(point);
+                    window.analyticsNS.addPoint({"x":point.date,"y":point.reduction.revenue,"stream":0});
+                    window.analyticsNS.addPoint({"x":point.date,"y":point.reduction.n_sales,"stream":1});
+                    window.analyticsNS.addPoint({"x":point.date,"y":point.reduction.avg_revenue,"stream":2});
+                })            
+        }
+
+        setInterval(howMuchTimeAgo,5000);
+        function howMuchTimeAgo(){
+            //this function prints out how much time ago each sale was made
+            $(".howMuchTimeAgo").each(function(){
+                var elapsedMessage = timeDifference( Math.floor(new Date().getTime()), Math.floor(new Date($(this).attr("date")).getTime()) );
+                $(this).html('<small>('+elapsedMessage + ')</small>');
+            })
+        }
+
+        function timeDifference(current, previous) {
+            //this function calculates the difference between two millisecond timestamps, and returns a formatted approximation
+            //credits: https://stackoverflow.com/questions/6108819/javascript-timestamp-to-relative-time-eg-2-seconds-ago-one-week-ago-etc-best
+
+            var msPerMinute = 60 * 1000;
+            var msPerHour = msPerMinute * 60;
+            var msPerDay = msPerHour * 24;
+            var msPerMonth = msPerDay * 30;
+            var msPerYear = msPerDay * 365;
+
+            var elapsed = current - previous;
+
+            if (elapsed < msPerMinute) {
+                return '~' + Math.round(elapsed / 1000) + ' seconds' + ' ago';
+            } else if (elapsed < msPerHour) {
+                return '~' + Math.round(elapsed / msPerMinute) + ' minutes' + ' ago';
+            } else if (elapsed < msPerDay) {
+                return '~' + Math.round(elapsed / msPerHour) + ' hours' + ' ago';
+            } else if (elapsed < msPerMonth) {
+                return '~' + Math.round(elapsed / msPerDay) + ' days' + ' ago';
+            } else if (elapsed < msPerYear) {
+                return '~' + Math.round(elapsed / msPerMonth) + ' months' + ' ago';
+            } else {
+                return '~' + Math.round(elapsed / msPerYear) + ' years' + ' ago';
+            }
+        }
+    </script>
+
+</body>
+
+</html>

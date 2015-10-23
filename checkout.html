@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Checkout Page</title>
+    <script src="./assets/jquery-1.11.1.min.js"></script>
+</head>
+
+<body>
+    Buyer ID:
+    <br>
+    <input type="text" id="buyer_id" placeholder="Jack">
+    <br>Product ID:
+    <br>
+    <input type="text" id="product_id" placeholder="Some product">
+    <br>Price:
+    <br>
+    <input type="text" id="price" placeholder="162">
+    <br>
+    <br>
+    <button id="buy">BUY</button>
+    <span id="response"></span>
+</body>
+
+<script type="text/javascript">
+    $("#buy").on("click", function () {
+        $.post("/checkout", {
+            buyer_id: $("#buyer_id").val(),
+            product_id: $("#product_id").val(),
+            price: $("#price").val()
+        }, function (response) {
+            $("#response").hide().html(response).fadeIn("fast");
+        });
+    })
+</script>
+
+</html>
