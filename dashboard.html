@@ -78,7 +78,6 @@
                 });
 
             chartObj.xAxis
-                //.tickFormat(d3.format(',.1f'))
                 .tickFormat(function(d) {
                             return d3.time.format('%H:%M')(new Date(d))
                           })
