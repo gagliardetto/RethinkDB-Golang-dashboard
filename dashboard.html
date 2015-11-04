@@ -129,43 +129,31 @@
         window.analyticsNS.log = function (message) {
             console.log(message)
         }
-        window.analyticsNS.switch = function (data) {
-            //this function checks the type of message and passes the data to the correspondent function;
-            //in this example we only have the "sale" type, which is passed to the loadLatestSales() function
-
-            switch(data.type) {
-                case "sale":
-                    console.log("it's a 'sale' event");
-                    window.analyticsNS.loadLatestSales(data.data);
-                    break;
-                default:
-                    console.log("it's a: '"+data.type+"' event");
-            }
-        }
         window.analyticsNS.loadLatestSales = function (data) {
             //this function checks if the data is an array, or a single sale;
 
             //window.analyticsNS.loadLatestSales([{buyer_id:"some user",product_id:"some product",price:100}])
             
-            console.log("loadLatestSales:",data);
+            var sales = data.data;
+            console.log("loadLatestSales:",sales);
 
-            if (data == null) {
+            if (sales == null) {
                 return
             };
 
-            if (Object.prototype.toString.call(data) === '[object Array]') {
-                //is an array of the latest 10 sales
+            if (Object.prototype.toString.call(sales) === '[object Array]') {
+                //is an array of the latest sales
                 //that is sent on every websocket (re)connection
                 
                 $("#latest_sales > p").remove(); //reset the content
 
-                $.each(data,function(i,sale){
+                $.each(sales,function(i,sale){
                     $("#latest_sales").append($('<p><b>'+sale.buyer_id+'</b> <small> bought</small> <b>'+sale.product_id+'</b> <small>for</small> <b>$'+sale.price+'</b> <span class="howMuchTimeAgo" date="'+sale.date+'"></span> </p>'));
                     $("#latest_sales > p:last").fadeIn();
                 })
             } else {
                 //is a single sale from the changefeed
-                $("#latest_sales").prepend($('<p><b>'+data.buyer_id+'</b> <small>just bought</small> <b>'+data.product_id+'</b> <small>for</small> <b>$'+data.price+'</b> <span class="howMuchTimeAgo" date="'+data.date+'"></span> </p>'));
+                $("#latest_sales").prepend($('<p><b>'+sales.buyer_id+'</b> <small>just bought</small> <b>'+sales.product_id+'</b> <small>for</small> <b>$'+sales.price+'</b> <span class="howMuchTimeAgo" date="'+sales.date+'"></span> </p>'));
                 $("#latest_sales > p:first").fadeIn();
 
                 if ($("#latest_sales > p").length > 50) {
@@ -175,10 +163,10 @@
 
             howMuchTimeAgo();
         }
-        window.analyticsNS.loadTopSellingProducts = function (data) {
+        window.analyticsNS.loadProductStats = function (data) {
             //this function is fired when the server sends the list of top selling products
 
-            console.log("loadTopSellingProducts:",data.data);
+            console.log("loadProductStats:",data.data);
 
             if (data.data != null) {
                 $("#top_selling > p").remove(); //reset the content

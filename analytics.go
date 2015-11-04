@@ -14,12 +14,12 @@ import (
 )
 
 var (
-	err               error
-	gino              *gin.Engine
-	rethinkSession    *r.Session
-	analyticsChannel  chan Change
-	allSocketSessions map[*AnalyticsSession]bool
-	changes           *r.Cursor
+	err              error
+	gino             *gin.Engine
+	rethinkSession   *r.Session
+	analyticsChannel chan Change
+	allSessions      map[*Session]bool
+	changes          *r.Cursor
 )
 
 var upgrader = websocket.Upgrader{
@@ -40,9 +40,8 @@ type Change struct {
 	OldVal M `gorethink:"old_val"`
 }
 
-type AnalyticsSession struct {
-	Request *http.Request
-	Conn    *websocket.Conn
+type Session struct {
+	Conn *websocket.Conn
 }
 
 type SocketOutgoingMessage struct {
@@ -51,7 +50,6 @@ type SocketOutgoingMessage struct {
 }
 
 func main() {
-	//let's connect to the db and use the "test" database
 	rethinkSession, err = r.Connect(r.ConnectOpts{
 		Address:  "localhost:28015",
 		Database: "test",
@@ -60,21 +58,16 @@ func main() {
 		log.Fatalf("Can't connect to rethinkdb: %q", err.Error())
 	}
 
-	//let's create the "analytics" table on the "test" db
 	_, err := r.DB("test").TableCreate("analytics").RunWrite(rethinkSession)
 	if err != nil {
-		//if the table already exists, the existing table won't be overwritten but an error will be thrown
-		fmt.Println(err)
+		log.Println(err)
 	}
-	///
 
-	//let's make the channel (declared globally) that will receive from the changefeed and pass the change objects to the connected websockets
+	//let's create the channel that will receive from the changefeed and pass the change objects to the connected websockets
 	analyticsChannel = make(chan Change)
 
-	//let's make the map which will contain all the cursors of websocket sessions
-	allSocketSessions = make(map[*AnalyticsSession]bool)
+	allSessions = make(map[*Session]bool)
 
-	//let's initiate the changefeed, which will feed to the "analyticsChannel" channel all the change objects
 	changes, err = r.Table("analytics").Changes().Run(rethinkSession)
 	if err != nil {
 		log.Println(err)
@@ -83,90 +76,66 @@ func main() {
 
 	//listen to changes and pass them to "analyticsChannel"
 	changes.Listen(analyticsChannel)
-	///
 
 	go func() {
-		//this goroutine is an infinite loop that receives from "analyticsChannel"
+		//this goroutine is an infinite loop that iterates over "analyticsChannel"
 		for {
-			//"received" is of "Change" type
 			var received Change
 
-			if rTemp, ok := <-analyticsChannel; ok {
-				//"analyticsChannel" is open and has received a new object
-				received = rTemp
-				fmt.Println("ok")
+			if receivedTemp, ok := <-analyticsChannel; ok {
+				received = receivedTemp
+				log.Println("new received:", received)
 			} else {
-				//"analyticsChannel" is closed
-				fmt.Println("channel is closed")
-				//the channel has been closed intentionally, or the connection to the server went down, or some other reason.
-
-				//break the receiving for loop
+				log.Println("analyticsChannel is closed")
 				break
 			}
 
-			//check for nil or empty "received" objects
 			if received.NewVal == nil || len(received.NewVal) == 0 {
-				fmt.Println("discarded", received)
+				log.Println("discarded", received)
 				continue
 			}
-			//warning: along with new entries to "analytics", modified entries will be catched too.
 
-			fmt.Println("new received:", received)
-
-			//create a new "socketOutgoingMessage"
 			socketOutgoingMessage := &SocketOutgoingMessage{
-				Function: "switch", //this is the function (in the "window.grapherF" namespace) that will be triggered on the client side
+				Function: "loadLatestSales", //this is the function (in the "window.analyticsNS" namespace) that will be triggered on the client side
 				Data: M{
-					"type": received.NewVal["type"], //type of event (sale|...)
-					"data": received.NewVal["data"], //content of the event object
+					"type": received.NewVal["type"],
+					"data": received.NewVal["data"],
 				},
 			}
 
-			//number of websockets currently connected and waiting for updates
-			fmt.Println("sessions' #:", len(allSocketSessions))
+			log.Println("Connected sessions count:", len(allSessions))
 
-			//iterate over all the connected websockets and send the "socketOutgoingMessage"
-			for s, v := range allSocketSessions {
-				//fmt.Println(s)
-				fmt.Println("config:", v)
-
-				//send the "socketOutgoingMessage" in JSON format using the builtin encoder
-				fmt.Println("sending change object")
-				err := s.Conn.WriteJSON(socketOutgoingMessage)
+			for session := range allSessions {
+				log.Println("sending socketOutgoingMessage")
+				err := session.Conn.WriteJSON(socketOutgoingMessage)
 				if err != nil {
-					log.Println("write:", err)
+					log.Println(err)
 					continue
 				}
 			}
 		}
 	}()
 
-	//in this example we use the Gin web framework; you can use any framework you like
 	gin.SetMode(gin.DebugMode)
 	gino = gin.Default()
-	gino.Static("/assets", "./assets") //folder containing json and css files
 
-	gino.StaticFile("/dashboard", "./dashboard.html") //the page where websockets receive data and display it
-
-	gino.StaticFile("/checkout", "./checkout.html") //a simple checkout page in html
+	gino.Static("/assets", "./assets")
+	gino.StaticFile("/dashboard", "./dashboard.html")
+	gino.StaticFile("/checkout", "./checkout.html")
 
 	gino.POST("/checkout", func(c *gin.Context) {
-		//the checkout POST endpoint
-
-		//some headers for a bit of security
 		c.Writer.Header().Set("x-frame-options", "SAMEORIGIN")
 		c.Writer.Header().Set("x-xss-protection", "1; mode=block")
 
-		c.Request.ParseForm() //parse the form
+		c.Request.ParseForm()
 
-		//convert the "price" field to float64 format
+		//convert the "price" field string to float64
 		price, err := strconv.ParseFloat(strings.TrimSpace(c.Request.Form.Get("price")), 64)
 		if err != nil {
-			fmt.Println(err)
+			log.Println(err)
 			return
 		}
 
-		//insert the purchase event to the "analytics" table
 		resp, err := r.Table("analytics").Insert(M{
 			"type": "sale",
 			"data": M{
@@ -178,111 +147,93 @@ func main() {
 		}).RunWrite(rethinkSession)
 
 		if err != nil {
-			fmt.Printf("error while inserting: %q", err)
+			log.Printf("error while inserting: %q", err)
 		}
-		fmt.Printf("%d event inserted\n", resp.Inserted)
+		log.Printf("%d event inserted\n", resp.Inserted)
 
 		c.Data(200, "text/html", []byte("Success"))
 	})
 
 	gino.GET("/socket", func(c *gin.Context) {
-		//this is the websocket endpoint
-
 		c.Writer.Header().Set("x-frame-options", "SAMEORIGIN")
 		c.Writer.Header().Set("x-xss-protection", "1; mode=block")
 
-		/*
-			write here the code that checks if user is logged in
-		*/
-
-		//The analyticsSocket function upgrades the connection.
-		//Whichever web framework you use, pass it the http.ResponseWriter and *http.Request
 		analyticsSocket(c.Writer, c.Request)
 	})
 
-	gino.Run(":8011") // listen and serve on 127.0.0.1:8011
+	gino.Run(":8011") //127.0.0.1:8011
 }
 
 func analyticsSocket(w http.ResponseWriter, r *http.Request) {
-	//let's check the method
 	if r.Method != "GET" {
 		http.Error(w, "Method not allowed", 405)
 		return
 	}
 
-	//upgrade to websocket
-	c, err := upgrader.Upgrade(w, r, nil)
+	websocketConnection, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Print("upgrade:", err)
 		return
 	}
-	fmt.Println("websocket successfully opened")
+	log.Println("websocket successfully opened")
 
-	//greate a new "AnalyticsSession" object; this will be then added to "allSocketSessions"
-	var thisSession AnalyticsSession
-	thisSession.Conn = c                   //c is of *websocket.Conn type; it will be used to send messages
-	thisSession.Request = r                //this is the request the client sent to the server; you can use it to read cookies, URL parameters, etc.
-	allSocketSessions[&thisSession] = true //some config we will never use in this example
+	var thisSession Session
+	thisSession.Conn = websocketConnection
+	allSessions[&thisSession] = true //some config we will never use in this example
 
-	//this will be fired when closing the connection
 	defer func() {
-		fmt.Println("websocket closed")
-		c.Close()                               //close websocket
-		delete(allSocketSessions, &thisSession) //remove this session from "allSocketSessions"
+		websocketConnection.Close()
+		delete(allSessions, &thisSession)
+		log.Println("websocket closed")
 	}()
 
-	///
-	loadLatestSales(c)
-	loadTopSellingProductsByNumberOfSales(c)
-	loadTopSellingProductsByRevenue(c)
-	loadTopSellingProducts(c)
-	loadGraphData(c)
-	///
+	loadLatestSales(websocketConnection)
+	loadProductStatsByNumberOfSales()
+	loadProductStatsByRevenue()
+	loadProductStats(websocketConnection)
+	loadGraphData(websocketConnection)
 
-	//let's setup an infiniteloop that receives from the websocket to keep it running
+	//let's setup an infinite loop that receives from the websocket to keep it running
 	for {
 		//in this example we don't need the received data, so we just discard it
-		if _, _, err := c.ReadMessage(); err != nil {
-			c.Close()
+		if _, _, err := websocketConnection.ReadMessage(); err != nil {
+			websocketConnection.Close()
 			break
 		}
 	}
 }
 
-func loadLatestSales(c *websocket.Conn) {
-	//this function loads the last n sales (the value inside Limit()) and sends them through the websocket
-
+func loadLatestSales(websocketConnection *websocket.Conn) {
 	results, err := r.Table("analytics").Filter(M{
 		"type": "sale",
 	}).OrderBy(
-		r.Desc(r.Row.Field("data").Field("date")), //order by date from most recent to older
+		r.Desc(r.Row.Field("data").Field("date")),
 	).Limit(10).Map(func(row r.Term) interface{} {
 		return row.Field("data")
 	}).Run(rethinkSession)
 	if err != nil {
-		fmt.Printf("error loadLatestSales: %q", err)
+		log.Printf("error loadLatestSales: %q", err)
 	}
 	defer results.Close()
 
 	var latestSales []interface{}
 	err = results.All(&latestSales)
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 		return
 	}
 
-	fmt.Printf("%d elements\n", len(latestSales))
+	log.Printf("sending latest %d sales\n", len(latestSales))
 
 	socketOutgoingMessage := &SocketOutgoingMessage{
-		Function: "switch",
+		Function: "loadLatestSales",
 		Data: M{
 			"type": "sale",
 			"data": latestSales,
 		},
 	}
 
-	//send latest sales through the websocket
-	err = c.WriteJSON(socketOutgoingMessage)
+	err = websocketConnection.WriteJSON(socketOutgoingMessage)
 	if err != nil {
 		log.Println(err)
 	}
@@ -307,34 +258,29 @@ func (p Result) String() string {
 	}
 }
 
-///
-
-func loadTopSellingProductsByNumberOfSales(c *websocket.Conn) {
-	//all products by number of sales
+func loadProductStatsByNumberOfSales() {
 	results, err := r.Table("analytics").Filter(M{
 		"type": "sale",
 	}).Group(func(row r.Term) interface{} {
-		//group sales by product id
 		return row.Field("data").Field("product_id")
-	}).Count().Run(rethinkSession) //for each group (i.e. product id), count the sales
+	}).Count().Run(rethinkSession)
 
 	if err != nil {
-		fmt.Printf("error loadTopSellingProductsByNumberOfSales: %q", err)
+		log.Printf("error loadProductStatsByNumberOfSales: %q", err)
 	}
 	defer results.Close()
 
 	var topSellingProductsByNumberOfSales []Result
 	err = results.All(&topSellingProductsByNumberOfSales)
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 		return
 	}
-	sort.Sort(ByReduction(topSellingProductsByNumberOfSales)) //sort in ASCENDING order by number of sales ("reduction")
+	sort.Sort(ByReduction(topSellingProductsByNumberOfSales))
 
-	fmt.Println(topSellingProductsByNumberOfSales)
+	log.Println(topSellingProductsByNumberOfSales)
 }
-func loadTopSellingProductsByRevenue(c *websocket.Conn) {
-	//all products by dollars sold
+func loadProductStatsByRevenue() {
 	results, err := r.Table("analytics").Filter(M{
 		"type": "sale",
 	}).Group(func(row r.Term) interface{} {
@@ -344,23 +290,22 @@ func loadTopSellingProductsByRevenue(c *websocket.Conn) {
 	}).Run(rethinkSession)
 
 	if err != nil {
-		fmt.Printf("error loadTopSellingProductsByRevenue: %q", err)
+		log.Printf("error loadProductStatsByRevenue: %q", err)
 	}
 	defer results.Close()
 
 	var topSellingProductsByRevenue []Result
 	err = results.All(&topSellingProductsByRevenue)
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 		return
 	}
 	sort.Sort(ByReduction(topSellingProductsByRevenue))
 
-	fmt.Println(topSellingProductsByRevenue)
+	log.Println(topSellingProductsByRevenue)
 }
 
-func loadTopSellingProducts(c *websocket.Conn) {
-	//all products by number of sales, and revenue
+func loadProductStats(websocketConnection *websocket.Conn) {
 	results, err := r.Table("analytics").Filter(M{
 		"type": "sale",
 	}).Group(func(row r.Term) interface{} {
@@ -378,40 +323,39 @@ func loadTopSellingProducts(c *websocket.Conn) {
 	}).Run(rethinkSession)
 
 	if err != nil {
-		fmt.Printf("error loadTopSellingProducts: %q", err)
+		log.Printf("error loadProductStats: %q", err)
 	}
 	defer results.Close()
 
 	var topSellingProducts []interface{}
 	err = results.All(&topSellingProducts)
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 		return
 	}
 
+	log.Println("\nloadProductStats:", topSellingProducts)
+
 	socketOutgoingMessage := &SocketOutgoingMessage{
-		Function: "loadTopSellingProducts",
+		Function: "loadProductStats",
 		Data: M{
 			"data": topSellingProducts,
 		},
 	}
-	err = c.WriteJSON(socketOutgoingMessage)
+	err = websocketConnection.WriteJSON(socketOutgoingMessage)
 	if err != nil {
 		log.Println(err)
 	}
-
-	fmt.Println("\nloadTopSellingProducts:", topSellingProducts)
 }
 
-func loadGraphData(c *websocket.Conn) {
+func loadGraphData(websocketConnection *websocket.Conn) {
 	currentTimestamp, _ := strconv.Atoi(strconv.FormatInt(time.Now().Unix(), 10))
 	timeFrom := currentTimestamp - 60*60 //the stats for the last 60 minutes
 
 	results, err := r.Table("analytics").Filter(
 		r.Row.Field("type").Eq("sale").And(
-			//we want entries of the past 60 minutes only
 			r.Row.Field("data").Field("date").Ge(r.EpochTime(timeFrom)),
-			//any entry older than timeFrom won't be considered
+			//exclude entries older than timeFrom
 		),
 	).Group(func(row r.Term) interface{} {
 		return []interface{}{
@@ -451,16 +395,18 @@ func loadGraphData(c *websocket.Conn) {
 	}).Run(rethinkSession)
 
 	if err != nil {
-		fmt.Printf("error loadGraphData: %q", err)
+		log.Printf("error loadGraphData: %q", err)
 	}
 	defer results.Close()
 
 	var graphData []interface{}
 	err = results.All(&graphData)
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 		return
 	}
+
+	log.Println("\ngraph data:", graphData)
 
 	socketOutgoingMessage := &SocketOutgoingMessage{
 		Function: "loadGraphData",
@@ -468,10 +414,8 @@ func loadGraphData(c *websocket.Conn) {
 			"data": graphData,
 		},
 	}
-	err = c.WriteJSON(socketOutgoingMessage)
+	err = websocketConnection.WriteJSON(socketOutgoingMessage)
 	if err != nil {
 		log.Println(err)
 	}
-
-	fmt.Println("\ngraph data:", graphData)
 }
